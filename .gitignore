@@ -1,0 +1,8 @@
+.claude/
+.ruff_cache/
+.venv/
+.env
+ENIGMA/.vs
+ENIGMA/x64
+ENIGMA/Compressor/x64
+*.exe
