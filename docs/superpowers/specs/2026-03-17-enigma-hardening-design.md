@@ -37,7 +37,7 @@ files → .engm → Enigma×1暗号化 → .enc → _partNNN.log分割
 ```
 [STEP 1] Wikipedia → seed(32B)
 [STEP 2] BCryptGenRandom → salt(32B)
-[STEP 3] PBKDF2-SHA256(password, salt, 100000回) → kdf_out(128B)
+[STEP 3] PBKDF2-SHA256(password, salt, 300000回) → kdf_out(128B)
            kdf_out[0:32]   = prot_key   (PNG保護用XOR鍵)
            kdf_out[32:64]  = eng_key1   (Enigmaパス2のrotor seed)
            kdf_out[64:96]  = eng_key2   (Enigmaパス3のrotor seed)
@@ -59,7 +59,7 @@ files → .engm → Enigma×1暗号化 → .enc → _partNNN.log分割
 ```
 [STEP 0] PNG LSBからsalt(32B) と seed_enc(32B)を抽出
           ※ sandi引数は無視する（暗号化時も無視したため）
-[STEP 1] PBKDF2-SHA256(password, salt, 100000回) → kdf_out(128B)
+[STEP 1] PBKDF2-SHA256(password, salt, 300000回) → kdf_out(128B)
 [STEP 2] seed = seed_enc XOR prot_key
 [STEP 3] _partNNN.log → .enc (既存pulihkan_dari_log、変更なし)
 [STEP 4] HMACタグ検証:
@@ -67,6 +67,10 @@ files → .engm → Enigma×1暗号化 → .enc → _partNNN.log分割
           ciphertext = .encの残り(.enc3相当)
           HMAC-SHA256(hmac_key, ciphertext) と tag を比較
           不一致の場合 → エラー出力後、.encをhapus_amanして即座に中断
+          ※ HMAC検証はSTEP 5（.enc3生成）より前に行うため、
+            不一致時は.enc1/.enc2/.enc3は未生成で残存なし。
+            ただし予期しない例外やSTEP途中の異常終了に備え、
+            .enc1/.enc2/.enc3が存在する場合も hapus_aman() でクリーンアップしてからreturnする。
 [STEP 5] ciphertext部分を.enc3として保存（先頭32Bスキップ）
 [STEP 6] Enigmaパス3逆: hasilkan_rotor_dari_benih(eng_key2) → enkripsi_berkas(.enc3 → .enc2)
           ※ enkripsi_berfasは対合(involutive)関数のため、復号も同じ関数を使う
@@ -102,7 +106,7 @@ void hmac_sha256(const uint8_t *key, size_t key_len,
 /* PBKDF2-SHA256
  * password / pw_len : パスワードとその長さ
  * salt / salt_len   : ソルトとその長さ (通常32B)
- * iterations        : イテレーション回数 (100000)
+ * iterations        : イテレーション回数 (300000)
  * out               : 出力バッファ
  * out_len           : 出力バイト数 (128B)
  */
@@ -194,10 +198,11 @@ static void hapus_aman(const char *jalur);
 **`pulihkan_berkas`の更新:**
 - PNG抽出でsalt + seed_enc取得（新シグネチャ対応）
 - PBKDF2復元 → seed, hmac_key等を導出
-- HMAC検証（失敗時はhapus_amanして即時return）
+- HMAC検証（失敗時は.enc + 存在する.enc1/.enc2/.enc3を全てhapus_amanしてから即時return）
 - HMACヘッダ(32B)スキップしてciphertext部を.enc3へ書き出し
 - Enigma 3パス逆順復号
-- 全一時ファイルを`hapus_aman`で削除
+- 全一時ファイルを`hapus_aman`で削除（各ステップ完了後に都度クリーンアップ）
+- 異常終了ケース: 各STEP後にエラーが発生した場合、その時点で生成済みの一時ファイルを全てhapus_amanしてreturn
 
 ---
 
@@ -205,7 +210,7 @@ static void hapus_aman(const char *jalur);
 
 | 脅威 | 現在 | 強化後 |
 |---|---|---|
-| パスワード総当たり | SHA-256(1回) ≒ 即座 | PBKDF2(100000回) ≒ 非常に遅い |
+| パスワード総当たり | SHA-256(1回) ≒ 即座 | PBKDF2(300000回) ≒ 非常に遅い |
 | 暗号文解析 | 単一Enigmaパス | 3パス独立鍵・相互依存 |
 | 改ざん検知 | なし | HMAC-SHA256 |
 | セッション固有性 | なし | ソルト毎回ランダム |
@@ -238,5 +243,5 @@ static void hapus_aman(const char *jalur);
 - 後方互換性なし（既存の.log/.pngファイルは復号不可）
 - log/csv偽装機能（`log_samar`）はそのまま維持
 - 外部ライブラリ追加なし（純C・WindowsAPIのみ）
-- PBKDF2の100000イテレーションにより暗号化時間が数秒増加（許容済み）
+- PBKDF2の300000イテレーションにより暗号化時間が数秒〜十数秒増加（速度より強度優先のため許容）
 - PNG LSBの64×64 RGBサイズは64Bのデータに対して十分な容量（704/12288ビット使用）
