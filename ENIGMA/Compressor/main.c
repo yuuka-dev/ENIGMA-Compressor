@@ -521,9 +521,9 @@ int main(void) {
     printf(MSG_TITLE);
     printf(MSG_HELP_DROP);
     printf(MSG_HELP_ENTER);
+    printf(MSG_HELP_RESTORE);
     printf(MSG_HELP_LIST);
     printf(MSG_HELP_CLEAR);
-    printf(MSG_HELP_RESTORE);
     printf(MSG_HELP_EXIT);
 
     while (fgets(masukan, sizeof(masukan), stdin)) {
@@ -531,11 +531,11 @@ int main(void) {
 
         /* ---- Deteksi perintah (baris tanpa kutip) ---- */
         if (strchr(masukan, '"') == NULL) {
-            if (strcmp(masukan, "keluar") == 0)    { break; }
-            if (strcmp(masukan, "bersih") == 0)    { jumlah_jalur = 0; printf(MSG_QUEUE_CLEARED); continue; }
-            if (strcmp(masukan, "daftar") == 0)    { tampilkan_daftar(antrian_jalur, jumlah_jalur); continue; }
-            if (strcmp(masukan, "pulihkan") == 0)  { pulihkan_berkas(); continue; }
-            if (masukan[0] == '\0')                { gabungkan_berkas(antrian_jalur, jumlah_jalur); jumlah_jalur = 0; continue; }
+            if (strcmp(masukan, "4") == 0)  { break; }
+            if (strcmp(masukan, "3") == 0)  { jumlah_jalur = 0; printf(MSG_QUEUE_CLEARED); printf(MSG_PROMPT_CMD); continue; }
+            if (strcmp(masukan, "2") == 0)  { tampilkan_daftar(antrian_jalur, jumlah_jalur); printf(MSG_PROMPT_CMD); continue; }
+            if (strcmp(masukan, "1") == 0)  { pulihkan_berkas(); printf(MSG_PROMPT_CMD); continue; }
+            if (masukan[0] == '\0')         { gabungkan_berkas(antrian_jalur, jumlah_jalur); jumlah_jalur = 0; printf(MSG_PROMPT_CMD); continue; }
         }
 
         /* ---- Baris jalur: tambah banyak jalur sekaligus ---- */

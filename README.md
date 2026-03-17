@@ -67,10 +67,10 @@ XOR password (blank = no XOR):
 | Command | Action |
 |---|---|
 | *(drop files, then)* Enter | Run encryption |
-| `pulihkan` | Restore mode |
-| `daftar` | Show queue |
-| `bersih` | Clear queue |
-| `keluar` | Exit |
+| `1` | Restore mode |
+| `2` | Show queue |
+| `3` | Clear queue |
+| `4` | Exit |
 
 ### Notes
 
@@ -127,10 +127,10 @@ XORパスワード (空白 = XORなし):
 | コマンド | 動作 |
 |---|---|
 | *(ファイルドロップ後)* Enter | 暗号化実行 |
-| `pulihkan` | 復元モード |
-| `daftar` | キュー表示 |
-| `bersih` | キュークリア |
-| `keluar` | 終了 |
+| `1` | 復元モード |
+| `2` | キュー表示 |
+| `3` | キュークリア |
+| `4` | 終了 |
 
 ### 注意事項
 
@@ -187,10 +187,10 @@ Sandi XOR (kosong = tanpa XOR):
 | Perintah | Fungsi |
 |---|---|
 | *(setelah drop file)* Enter | Jalankan enkripsi |
-| `pulihkan` | Mode pemulihan |
-| `daftar` | Tampilkan antrian |
-| `bersih` | Kosongkan antrian |
-| `keluar` | Tutup program |
+| `1` | Mode pemulihan |
+| `2` | Tampilkan antrian |
+| `3` | Kosongkan antrian |
+| `4` | Tutup program |
 
 ### Catatan
 
