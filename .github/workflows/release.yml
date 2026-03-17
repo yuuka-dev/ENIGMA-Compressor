@@ -53,14 +53,10 @@ jobs:
       - name: Build Release x64
         shell: pwsh
         run: |
-          $define = "NDEBUG;_CONSOLE"
-          if ("${{ matrix.lang_define }}" -ne "") {
-            $define = "${{ matrix.lang_define }};$define"
-          }
           msbuild ENIGMA/Compressor/Compressor.vcxproj `
             /p:Configuration=Release `
             /p:Platform=x64 `
-            "/p:PreprocessorDefinitions=$define;%(PreprocessorDefinitions)"
+            /p:LangDefine="${{ matrix.lang_define }}"
 
       - name: Rename executable
         shell: pwsh
