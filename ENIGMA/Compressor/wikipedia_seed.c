@@ -1,10 +1,25 @@
 /*
- * wikipedia_seed.c
+ * wikipedia_seed.c — Wikipedia-based seed generation via WinHTTP
  *
- * Komunikasi HTTPS Wikipedia via WinHTTP (API Windows),
- * artikel acak + oldid di-SHA256 untuk benih.
+ * [EN] Fetches a random Wikipedia article over HTTPS using the native Windows
+ *      WinHTTP API and derives a 32-byte seed by hashing the article content.
  *
- * Tanpa lib eksternal - winhttp.lib bawaan Windows.
+ *      No external library required — winhttp.lib ships with every Windows SDK.
+ *
+ *      Implementation notes:
+ *        - All HTTPS connections target en.wikipedia.org port 443
+ *        - JSON responses are parsed with simple strstr-based extraction
+ *          (no JSON library), which is safe because the Wikipedia API response
+ *          structure is stable and the fields of interest contain only ASCII
+ *        - Article titles containing non-ASCII characters are URL-encoded
+ *          using %XX encoding (spaces become %20, not +)
+ *        - Wide-char (wchar_t) paths are used for WinHTTP path parameters
+ *        - Response body is capped at MAKS_RESPONS (512 KB) to bound memory
+ *
+ * [ID] Ambil artikel acak Wikipedia via HTTPS WinHTTP. Tanpa lib eksternal.
+ *      JSON di-parse dengan strstr sederhana. URL encode untuk judul non-ASCII.
+ * [JA] WinHTTP を使って Wikipedia のランダム記事を HTTPS で取得し種を生成する。
+ *      外部ライブラリ不要。JSON解析はstrstr、非ASCIIタイトルはURLエンコード。
  */
 
 #include "wikipedia_seed.h"
@@ -24,7 +39,8 @@
 #endif
 
 /* ================================================================
- * 内部定数
+ * Internal constants
+ * [ID] Konstanta internal | [JA] 内部定数
  * ================================================================ */
 
 static const wchar_t WIKI_HOST[] = L"en.wikipedia.org";
@@ -38,10 +54,16 @@ static const wchar_t WIKI_HOST[] = L"en.wikipedia.org";
 #define MAKS_PATH_W     _N2048         /* panjang max path WinHTTP (wchar) */
 
 /* ================================================================
- * Pembantu internal - konversi ASCII <-> wide char
+ * c2w — ASCII/Latin-1 string to wide-char conversion
+ *
+ * [EN] Converts a narrow string to wchar_t for WinHTTP path parameters.
+ *      Handles only BMP code points (sufficient for URL-encoded ASCII output).
+ * [ID] Konversi string ASCII ke wide char untuk parameter WinHTTP.
+ * [JA] WinHTTPパスパラメータ用にASCII文字列をwchar_tに変換する。
  * ================================================================ */
 
-/* Konversi string ASCII/Latin-1 ke wide (hanya BMP) */
+/* Convert ASCII/Latin-1 string to wide-char (BMP only)
+ * [JA] ASCII/Latin-1文字列をワイド文字に変換（BMP範囲のみ） */
 static void c2w(const char *src, wchar_t *dst, size_t dst_wchars) {
     size_t i = 0;
     for (; i < dst_wchars - 1 && src[i]; i++)
@@ -50,10 +72,13 @@ static void c2w(const char *src, wchar_t *dst, size_t dst_wchars) {
 }
 
 /* ================================================================
- * Pembantu internal - URL encode
+ * url_encode — Percent-encode a string for use in Wikipedia API URLs
  *
- * Karakter selain alfanumerik dan "-_.~" jadi %XX.
- * Spasi pakai %20, bukan + (kompatibilitas API Wikipedia).
+ * [EN] Encodes all characters except unreserved (A-Z a-z 0-9 - _ . ~) as
+ *      %XX hexadecimal sequences.  Spaces become %20 (not +) for compatibility
+ *      with the Wikipedia REST API path format.
+ * [ID] Encode karakter non-alfanumerik menjadi %XX. Spasi jadi %20.
+ * [JA] 英数字と "-_.~" 以外を %XX にエンコードする。スペースは %20。
  * ================================================================ */
 static void url_encode(const char *src, char *dst, size_t dst_sz) {
     const char *p   = src;
@@ -77,13 +102,21 @@ static void url_encode(const char *src, char *dst, size_t dst_sz) {
 }
 
 /* ================================================================
- * Pembantu internal - ekstraksi JSON sederhana (basis strstr)
+ * Lightweight JSON field extraction (strstr-based)
  *
- * Respons API Wikipedia format stabil,
- * cukup pencarian strstr ringan.
+ * [EN] Wikipedia API responses have a stable, simple JSON structure.
+ *      Rather than linking a full JSON library, two helpers cover the only
+ *      two patterns needed:
+ *        json_str : extracts the string value for  "key":"VALUE"
+ *        json_num : extracts the numeric value for "key":NUMBER
+ *      Neither handles escape sequences, but the fields of interest
+ *      (article title, revid) contain only ASCII characters.
+ * [ID] Ekstraksi field JSON sederhana dengan strstr. Cukup untuk respons Wikipedia.
+ * [JA] strstrベースの軽量JSON抽出。Wikipedia APIの安定したレスポンス形式に対応。
  * ================================================================ */
 
-/* "key":"VALUE" -> ekstrak VALUE ke out */
+/* "key":"VALUE" → extract VALUE into out
+ * [JA] "key":"VALUE" 形式からVALUEを抽出 */
 static int json_str(const char *json, const char *key,
                     char *out, size_t out_sz) {
     char        pat[256];
@@ -104,7 +137,8 @@ static int json_str(const char *json, const char *key,
     return 0;
 }
 
-/* "key":NUMBER -> ekstrak string angka ke out */
+/* "key":NUMBER → extract numeric string into out
+ * [JA] "key":NUMBER 形式から数値文字列を抽出 */
 static int json_num(const char *json, const char *key,
                     char *out, size_t out_sz) {
     char        pat[256];
@@ -124,10 +158,16 @@ static int json_num(const char *json, const char *key,
 }
 
 /* ================================================================
- * Pembantu internal - WinHTTP GET
+ * http_get — Send an HTTPS GET request and return the response body
  *
- * Kirim HTTPS GET ke path, kembalikan body respons (dialokasi dinamis).
- * Pemanggil bertanggung jawab free(*out_buf).
+ * [EN] Opens a WinHTTP session, connects to WIKI_HOST on port 443, sends a
+ *      GET request for path, and reads the response body in chunks up to
+ *      MAKS_RESPONS (512 KB) bytes.  The returned buffer is heap-allocated
+ *      and null-terminated; the caller must free(*out_buf).
+ *      Returns 0 on success, -1 on any WinHTTP or allocation error.
+ * [ID] HTTPS GET via WinHTTP. Buffer dialokasi dinamis, pemanggil harus free.
+ * [JA] WinHTTPでHTTPS GETを送信し、レスポンスボディをヒープに格納して返す。
+ *      呼び出し元が free(*out_buf) する責任を持つ。
  * ================================================================ */
 static int http_get(const wchar_t *path,
                     uint8_t **out_buf, size_t *out_len) {
@@ -190,22 +230,38 @@ fin:
 }
 
 /* ================================================================
- * 公開 API
+ * Public API
+ * [ID] API publik | [JA] 公開API
  * ================================================================ */
 
 /*
- * ambil_benih_wikipedia
+ * ambil_benih_wikipedia — Fetch a random Wikipedia article and derive seed
  *
- * 1. Ambil judul artikel acak
- *       GET /w/api.php?action=query&list=random&rnnamespace=0&rnlimit=1&format=json
+ * [EN] Executes the four-step seed derivation pipeline:
  *
- * 2. Ambil oldid (revision ID)
- *       GET /w/api.php?action=query&prop=revisions&titles=TITLE&rvprop=ids&rvlimit=1&format=json
+ *      Step 1 — Random article title:
+ *        GET /w/api.php?action=query&list=random&rnnamespace=0&rnlimit=1&format=json
  *
- * 3. Ambil wikitext mentah
- *       GET /w/index.php?action=raw&title=TITLE&oldid=REVID
+ *      Step 2 — Latest revision ID (oldid):
+ *        GET /w/api.php?action=query&prop=revisions&titles=<TITLE>
+ *                      &rvprop=ids&rvlimit=1&format=json
  *
- * 4. SHA-256( revid || 0x0A || wikitext ) -> benih 32 byte
+ *      Step 3 — Raw wikitext at that revision:
+ *        GET /w/index.php?action=raw&title=<TITLE>&oldid=<REVID>
+ *
+ *      Step 4 — Seed derivation:
+ *        SHA-256( revid_string || 0x0A || wikitext ) → benih[32]
+ *
+ *      Mixing the revid ensures that two fetches of the same article at
+ *      different revisions produce different seeds.  The 0x0A byte acts as
+ *      a domain separator.  The info string is formatted as:
+ *        "Article Title (oldid=123456, 8192 byte)"
+ *      and is intended for display and storage in the PNG key file.
+ *
+ * [ID] Pipeline 4 langkah: ambil judul acak → oldid → wikitext → SHA-256.
+ *      revid dicampur agar tiap revisi menghasilkan benih berbeda.
+ * [JA] 4ステップのパイプライン: ランダム記事→oldid→wikitext→SHA-256。
+ *      revidを混入することで同記事の異なるリビジョンでも異なる種を生成する。
  */
 int ambil_benih_wikipedia(uint8_t benih[32], char *info, size_t info_sz) {
     uint8_t *resp    = NULL; /* buffer respons HTTP */

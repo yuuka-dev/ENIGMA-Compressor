@@ -5,16 +5,36 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Ukuran buffer transfer chunk */
+/*
+ * packer.c — ENIGMA Archive packer / unpacker implementation
+ *
+ * [EN] Implements pak_berkas() and buka_arsip() as declared in packer.h.
+ *      pak_berkas() writes a sequential stream: one HeaderArsip followed by
+ *      (HeaderBerkas + path bytes + file data) blocks, transferring file data
+ *      in UKURAN_CHUNK (4096-byte) pieces to avoid large stack allocations.
+ *      buka_arsip() traverses the same layout zero-copy by advancing a cursor
+ *      pointer through the caller-supplied buffer.
+ *
+ * [ID] Implementasi pak_berkas() dan buka_arsip(). Data ditransfer per chunk
+ *      4096 byte. buka_arsip() zero-copy via pointer traversal.
+ * [JA] pak_berkas() と buka_arsip() の実装。ファイルデータは4096バイトチャンクで転送。
+ *      buka_arsip() はゼロコピーのポインタトラバーサルを使用する。
+ */
+
+/* Transfer chunk size: _N1024 × _N4 = 4096 bytes
+ * [JA] 転送チャンクサイズ: 4096バイト */
 #define UKURAN_CHUNK (_N1024 * _N4)
 
 /*
- * buat_magic - Turunkan 4 byte magic dinamis dari benih
+ * buat_magic — Derive 4-byte dynamic magic from seed
  *
- * Gunakan 4 byte pertama SHA-256( benih[32] || "MGCK" ).
- * Label domain "MGCK" mencegah interferensi dengan turunan kunci lain.
- * Benih sama selalu menghasilkan magic sama (deterministik).
- * Tanpa benih benar, magic tidak dapat diprediksi atau dipalsukan.
+ * [EN] Computes the first 4 bytes of SHA-256(seed[32] || "MGCK").
+ *      The "MGCK" domain label prevents cross-context collisions with other
+ *      SHA-256 derivations from the same seed.  The magic is deterministic:
+ *      the same seed always produces the same magic, but without the correct
+ *      seed the value cannot be predicted or forged.
+ * [ID] Turunkan magic 4 byte dari SHA-256(benih || "MGCK"). Deterministik.
+ * [JA] SHA-256(seed || "MGCK") の先頭4バイトを動的マジックとして導出する。
  */
 static void buat_magic(const uint8_t *benih, uint8_t *magic) {
     uint8_t tmp[_N32 + _N4];
@@ -33,14 +53,17 @@ static void buat_magic(const uint8_t *benih, uint8_t *magic) {
 }
 
 /* ================================================================
- * pak_berkas
+ * pak_berkas — Pack multiple files into one .engm archive
  *
- * Urutan tulis (sekuensial):
- *   HeaderArsip
- *   loop x jumlah:
- *     HeaderBerkas  (pragma pack(1))
- *     byte jalur    (fwrite langsung)
- *     byte data     (transfer per chunk)
+ * [EN] Write order (sequential, no seeking):
+ *        HeaderArsip
+ *        for each file:
+ *          HeaderBerkas  (pragma pack(1), no padding)
+ *          path bytes    (direct fwrite)
+ *          file data     (chunked transfer, UKURAN_CHUNK bytes at a time)
+ *      Files that fail to open are recorded as 0-byte entries with a warning.
+ * [ID] Tulis berurutan: HeaderArsip + loop (HeaderBerkas + jalur + data chunk).
+ * [JA] 順次書き込み: HeaderArsip + ループ（HeaderBerkas + パス + チャンクデータ）。
  * ================================================================ */
 int pak_berkas(const char * const *jalur, uint32_t jumlah,
                const char *jalur_keluar, const uint8_t benih[32]) {
@@ -111,20 +134,23 @@ int pak_berkas(const char * const *jalur, uint32_t jumlah,
 }
 
 /* ================================================================
- * buka_arsip - Penelusuran pointer zero-copy
+ * buka_arsip — Parse an .engm archive buffer (zero-copy pointer traversal)
  *
- * Hanya geser pointer kursor dari awal ke akhir buffer
- * untuk parse semua entri. Tidak perlu malloc/salin.
- *
- *   kursor -> HeaderArsip
- *   kursor += sizeof(HeaderArsip)
- *   loop:
- *     kursor -> HeaderBerkas
- *     kursor += sizeof(HeaderBerkas)
- *     kursor -> byte jalur         (InfoBerkas.jalur = kursor)
- *     kursor += panjang_jalur
- *     kursor -> byte data         (InfoBerkas.data = kursor)
- *     kursor += ukuran_data
+ * [EN] Advances a single cursor pointer from the start to the end of buf[],
+ *      filling hasil[] with direct pointers into the buffer — no malloc, no
+ *      memcpy.  Cursor movement:
+ *        cursor → HeaderArsip         (verify magic + version)
+ *        cursor += sizeof(HeaderArsip)
+ *        for each entry:
+ *          cursor → HeaderBerkas
+ *          cursor += sizeof(HeaderBerkas)
+ *          InfoBerkas.jalur = cursor  (path, no null terminator)
+ *          cursor += panjang_jalur
+ *          InfoBerkas.data  = cursor  (raw file data)
+ *          cursor += ukuran_data
+ *      Returns -1 immediately on any bounds violation.
+ * [ID] Traverse pointer zero-copy. Isi hasil[] dengan pointer ke buffer.
+ * [JA] ゼロコピーのポインタトラバーサル。hasil[] にバッファへの直接ポインタを格納。
  * ================================================================ */
 int buka_arsip(const uint8_t *buf, size_t ukuran,
                InfoBerkas *hasil, uint32_t *jumlah_keluar,

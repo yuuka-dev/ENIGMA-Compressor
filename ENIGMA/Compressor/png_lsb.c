@@ -1,18 +1,26 @@
 /*
- * png_lsb.c
+ * png_lsb.c — PNG LSB steganography implementation (no external library)
  *
- * Steganografi PNG LSB - modul penyembunyian/ekstraksi benih
+ * [EN] Self-contained PNG generation and parsing for seed steganography.
+ *      The PNG format is subset-only: 64×64 RGB, 8-bit depth, DEFLATE stored
+ *      block (no actual compression — the raw pixel data is stored verbatim
+ *      inside a zlib wrapper).  This avoids a dependency on zlib or libpng.
  *
- * Tanpa lib eksternal. Bangkitkan PNG sendiri (64x64 RGB, DEFLATE stored block).
+ *      Carrier pixel content: deterministic SHA-256 CTR noise seeded with the
+ *      fixed constant "ENIGMA_PNG_LSB_CARRIER".  The noise makes the image
+ *      look like a plausible thumbnail while being fully reproducible so that
+ *      only the LSBs need to be read during extraction.
  *
- * Alur sembunyikan:
- *   benih -> XOR(SHA256(sandi)) -> Base64 -> LSB piksel -> tulis PNG
+ *      LSB capacity : 64 × 64 × 3 channels = 12,288 bits = 1,536 bytes
+ *      Payload size : [length:1 byte] + [Base64:44 bytes] = 45 bytes = 360 bits
  *
- * Alur ekstrak:
- *   Baca PNG -> LSB piksel -> Base64 -> XOR(SHA256(sandi)) -> benih
+ *      PNG chunks written: PNG signature → IHDR → IDAT → IEND
+ *      PNG chunks read:    signature → IHDR (skip) → IDAT (extract) → IEND
  *
- * Kapasitas LSB: 64 x 64 x 3ch = 12,288 bit = 1,536 byte
- * Kebutuhan: [panjang:1byte] + [Base64:44byte] = 45byte = 360bit
+ * [ID] Implementasi steganografi LSB tanpa lib eksternal. PNG 64×64 RGB dengan
+ *      DEFLATE stored block. Kapasitas 1536 byte, payload 45 byte.
+ * [JA] 外部ライブラリ不要のPNG LSBステガノグラフィ実装。64×64 RGB、
+ *      DEFLATEストアドブロック。容量1536バイト、ペイロード45バイト。
  */
 
 #include "png_lsb.h"
@@ -56,7 +64,9 @@
 #define PAYLOAD_LEN  (_N1 + B64_LEN)         /* 45 */
 
 /* ================================================================
- * Adler-32 checksum (wajib untuk zlib)
+ * Adler-32 checksum (required by the zlib wrapper in IDAT)
+ * [ID] Checksum Adler-32 wajib untuk wrapper zlib
+ * [JA] IDATのzlibラッパーに必要なAdler-32チェックサム
  * ================================================================ */
 
 static uint32_t adler32_hitung(const uint8_t *data, size_t n) {
@@ -71,7 +81,9 @@ static uint32_t adler32_hitung(const uint8_t *data, size_t n) {
 }
 
 /* ================================================================
- * CRC-32 (untuk chunk PNG)
+ * CRC-32 (required for each PNG chunk's trailing checksum)
+ * [ID] CRC-32 wajib di akhir tiap chunk PNG
+ * [JA] PNGチャンク末尾のCRC-32チェックサム
  * ================================================================ */
 
 static uint32_t g_crc_table[256];
@@ -102,6 +114,10 @@ static uint32_t crc32_buf(const uint8_t *buf, size_t len) {
 
 /* ================================================================
  * Base64 encode / decode
+ * [EN] Standard Base64 alphabet (RFC 4648).  Encode: 32 bytes → 44 chars.
+ *      Decode: validates each character and stops at padding '='.
+ * [ID] Base64 standar. Encode: 32 byte → 44 karakter.
+ * [JA] 標準Base64（RFC 4648）。エンコード: 32バイト→44文字。
  * ================================================================ */
 
 static const char B64_TBL[] =
@@ -166,10 +182,18 @@ static int b64_decode(const char *src, size_t src_len, uint8_t *out) {
 }
 
 /* ================================================================
- * Bangkitkan piksel carrier (noise SHA-256 CTR)
+ * buat_piksel_dasar — Generate deterministic carrier pixel noise
  *
- * Benih tetap untuk noise pseudo-acak.
- * Ekstraksi bisa replika dengan benih sama, cukup baca LSB.
+ * [EN] Fills the pixel channel buffer with a deterministic SHA-256 CTR
+ *      stream seeded by the fixed constant "ENIGMA_PNG_LSB_CARRIER".
+ *      Because the noise is fully reproducible, the extraction side can
+ *      regenerate it and only needs to read the LSBs — the carrier pixels
+ *      themselves carry no information that needs to be stored.
+ *      The visual result is a noisy but plausible-looking thumbnail.
+ * [ID] Isi piksel dengan noise deterministik SHA-256 CTR (benih tetap).
+ *      Ekstraksi cukup baca LSB, noise bisa direproduksi.
+ * [JA] 固定シードによるSHA-256 CTRノイズでピクセルを埋める。
+ *      ノイズは再現可能なのでLSBを読むだけで復元できる。
  * ================================================================ */
 
 static void buat_piksel_dasar(uint8_t *ch, size_t n) {
@@ -203,11 +227,15 @@ static void buat_piksel_dasar(uint8_t *ch, size_t n) {
 }
 
 /* ================================================================
- * §6  LSB 埋め込み / 抽出
+ * LSB embed / extract helpers
+ * [EN] Scatter payload bits into channel LSBs (MSB-first bit order).
+ *      Each channel byte contributes exactly one bit of payload.
+ * [ID] Simpan/ambil bit payload dari LSB tiap channel (urutan MSB first).
+ * [JA] ペイロードビットをチャネルLSBに分散/収集する（MSBファースト）。
  * ================================================================ */
 
-/* channels[] の各バイト LSB に data[] のビット列を埋め込む
- * (ビッグエンディアン順: MSB first) */
+/* Embed data[] bits into the LSB of each channels[] byte (MSB first)
+ * [JA] data[]のビット列をchannels[]の各バイトLSBに埋め込む */
 static void lsb_umat(uint8_t *channels, size_t ch_count,
                      const uint8_t *data, size_t data_bits) {
     size_t bit;
@@ -217,7 +245,8 @@ static void lsb_umat(uint8_t *channels, size_t ch_count,
     }
 }
 
-/* channels[] の各バイト LSB からビット列を抽出して data[] に復元 */
+/* Extract bit stream from LSBs of channels[] and reconstruct data[]
+ * [JA] channels[]の各バイトLSBからビット列を抽出してdata[]に復元 */
 static void lsb_ambil(const uint8_t *channels, size_t ch_count,
                       uint8_t *data, size_t data_bits) {
     size_t bit;
@@ -229,10 +258,15 @@ static void lsb_ambil(const uint8_t *channels, size_t ch_count,
 }
 
 /* ================================================================
- * §7  PNG チャンク書き込みヘルパー
+ * PNG chunk writing helpers
+ * [EN] Minimal PNG writer: big-endian 32-bit helper and chunk serialiser
+ *      (length + type + data + CRC).
+ * [ID] Helper penulisan chunk PNG minimal.
+ * [JA] 最小限のPNGチャンク書き込みヘルパー。
  * ================================================================ */
 
-/* 4バイト big-endian 書き込み */
+/* Write a 4-byte big-endian uint32_t to file
+ * [JA] 4バイトビッグエンディアンをファイルに書き込む */
 static void tulis_be32(FILE *f, uint32_t v) {
     uint8_t b[_N4];
     b[0] = (uint8_t)(v >> 24); b[1] = (uint8_t)(v >> 16);
@@ -240,7 +274,8 @@ static void tulis_be32(FILE *f, uint32_t v) {
     fwrite(b, 1, _N4, f);
 }
 
-/* チャンク書き出し: 長さ(4BE) + タイプ(4) + データ + CRC(4BE) */
+/* Write a PNG chunk: length(4BE) + type(4) + data + CRC(4BE)
+ * [JA] PNGチャンク書き出し: 長さ(4BE) + タイプ(4) + データ + CRC(4BE) */
 static int tulis_chunk(FILE *f, const char type[_N4],
                         const uint8_t *data, uint32_t len) {
     uint32_t crc;
@@ -270,14 +305,19 @@ static int tulis_chunk(FILE *f, const char type[_N4],
 }
 
 /* ================================================================
- * Tulis PNG (64x64 RGB, DEFLATE stored block)
+ * tulis_png_64x64 — Write a self-generated 64×64 RGB PNG file
  *
- * Struktur wrapper zlib:
- *   [CMF=0x78][FLG=0x01]           - header zlib
- *   [0x01][LEN_LO][LEN_HI]         - BFINAL=1, BTYPE=00 (stored)
- *   [NLEN_LO][NLEN_HI]             - ~LEN
- *   [RAW_BYTES byte]               - data mentah dengan filter
- *   [Adler-32 BE 4 byte]          - checksum zlib
+ * [EN] Produces a minimal but valid PNG without any external library.
+ *      IDAT payload structure (zlib stored block, no compression):
+ *        [CMF=0x78][FLG=0x01]       zlib header
+ *        [0x01][LEN_LO][LEN_HI]     BFINAL=1, BTYPE=00 (stored)
+ *        [NLEN_LO][NLEN_HI]         one's complement of LEN
+ *        [RAW_BYTES bytes]           raw pixel rows with filter byte 0x00
+ *        [Adler-32 big-endian 4B]   zlib checksum
+ *      Chunks: PNG signature → IHDR → IDAT → IEND
+ * [ID] Tulis PNG 64×64 RGB tanpa lib. DEFLATE stored block (tanpa kompresi).
+ * [JA] 外部ライブラリなしで64×64 RGB PNGを生成する。
+ *      DEFLATEストアドブロック（非圧縮）を使用する。
  * ================================================================ */
 
 static int tulis_png_64x64(FILE *f, const uint8_t *pixels) {
@@ -356,10 +396,17 @@ fin:
 }
 
 /* ================================================================
- * §9  PNG 読み込み (自己生成フォーマット専用)
+ * baca_png_64x64 — Read pixel data from a self-generated 64×64 RGB PNG
  *
- * IDAT を見つけ、zlib stored block ヘッダを読み飛ばして
- * 生ピクセルデータ (フィルタバイト込み) を pixels[] に展開する。
+ * [EN] Parses only the subset of PNG written by tulis_png_64x64().
+ *      Scans chunks in order: IHDR is skipped, IDAT is read, IEND stops
+ *      scanning.  Unknown chunk types are skipped via fseek.
+ *      In the IDAT chunk, the zlib header (2B) and stored-block header (5B)
+ *      are skipped (7 bytes total) to reach the raw pixel rows.  Each row's
+ *      leading filter byte 0x00 is also skipped before copying pixel data.
+ *      Returns 0 on success, -1 if IDAT is missing or the buffer is too small.
+ * [ID] Baca PNG format sendiri. Skip IHDR, baca IDAT, lewati header zlib+stored.
+ * [JA] 自己生成PNGを読み込む。IHDRをスキップし、IDATからピクセルデータを展開する。
  * ================================================================ */
 
 static int baca_png_64x64(FILE *f, uint8_t *pixels) {
@@ -427,14 +474,18 @@ fin:
 }
 
 /* ================================================================
- * 公開 API
+ * Public API
+ * [ID] API publik | [JA] 公開API
  * ================================================================ */
 
 /*
- * sembunyikan_benih_png
+ * sembunyikan_benih_png — Hide seed[32] in a PNG file's LSBs
  *
- * benih[32] を PNG LSB に隠蔽する。
- * sandi が空でなければ SHA-256(sandi) を XOR 鍵として使用。
+ * [EN] Full pipeline: optional XOR → Base64 encode → prepend length byte
+ *      → embed bits into carrier pixel LSBs → write PNG to jalur_keluar.
+ *      If sandi is non-empty, seed is XOR-encrypted with SHA-256(sandi) first.
+ * [ID] Pipeline: XOR opsional → Base64 → embed LSB → tulis PNG.
+ * [JA] XOR（任意）→Base64→LSB埋め込み→PNG書き出しのパイプライン。
  */
 int sembunyikan_benih_png(const char  *jalur_keluar,
                            const uint8_t benih[32],
@@ -487,10 +538,15 @@ fin:
 }
 
 /*
- * ekstrak_benih_png
+ * ekstrak_benih_png — Recover seed[32] from a PNG file's LSBs
  *
- * PNG LSB から benih[32] を抽出する。
- * sandi が空でなければ SHA-256(sandi) を XOR 鍵として使用。
+ * [EN] Inverse pipeline: read PNG → extract LSBs → validate length byte
+ *      → Base64 decode → optional XOR-decrypt → benih[32].
+ *      Returns -1 if the length field does not equal B64_LEN (wrong file,
+ *      corruption, or password mismatch detected at decode time).
+ * [ID] Pipeline kebalikan: baca PNG → LSB → validasi panjang → Base64 decode
+ *      → XOR opsional → benih[32].
+ * [JA] 逆パイプライン: PNG読み込み→LSB抽出→長さ検証→Base64デコード→XOR→seed。
  */
 int ekstrak_benih_png(const char *jalur_masuk,
                        uint8_t     benih[32],

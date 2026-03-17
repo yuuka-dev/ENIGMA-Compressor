@@ -1,13 +1,23 @@
 /*
- * enigma_engine.c - implementasi obfuskasi
+ * enigma_engine.c — Enigma cipher engine implementation
  *
- * 依存ヘッダ: stdio.h  stdint.h  string.h のみ
- * 方針:
- *   - 重要ロジックは可能な限り #define に落とす
- *   - ヘルパー関数は FORCEINLINE でインライン強制
- *   - __asm__ によるジャンク命令を要所に混入
- *   - 常に True/False になる不透明な述語でフロー解析を妨害
- *   - すべての固定数値リテラルを sizeof(struct{char a[N];}) で再定義
+ * [EN] Core cryptographic implementation.  Obfuscation strategy:
+ *        - All hot logic is macro-expanded via #define to eliminate call sites
+ *        - Helper functions are forced inline (FORCEINLINE) to prevent
+ *          function-level analysis in disassemblers
+ *        - Junk NOP / multiply-then-XOR sequences (JUNK_ASM / JUNK_ASM_MUL)
+ *          are inserted at key points to confuse control-flow analysis
+ *        - Opaque predicates (OPAK_TRUE_*, OPAK_FALSE_*) that always evaluate
+ *          to the same value at runtime wrap real branches to mislead symbolic
+ *          execution and taint analysis
+ *        - Every integer literal is replaced with _N macros (sizeof expressions)
+ *          to eliminate recognisable constant patterns from the binary
+ *      Dependencies: stdio.h, stdint.h, string.h only — no external libraries.
+ *
+ * [ID] Implementasi cipher Enigma dengan obfuskasi: makro inline, junk ASM,
+ *      predikat buram, dan penggantian literal numerik dengan sizeof.
+ * [JA] Enigma暗号実装。インライン強制マクロ・ジャンク命令・不透明述語・
+ *      sizeof定数置換による難読化を施している。
  */
 
 #include "enigma_engine.h"
@@ -17,7 +27,9 @@
 #include <string.h>
 
 /* ================================================================
- * §0  コンパイラ・アーキテクチャ互換マクロ
+ * §0  Compiler / architecture compatibility macros
+ *     [ID] Makro kompatibilitas kompiler/arsitektur
+ *     [JA] コンパイラ・アーキテクチャ互換マクロ
  * ================================================================ */
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -50,8 +62,14 @@
 #endif
 
 /* ================================================================
- * §2  不透明な述語
- *     _N マクロを使うことで即値パターンも消える
+ * §2  Opaque predicates
+ *
+ * [EN] Expressions that always evaluate to TRUE or FALSE at runtime,
+ *      but whose value cannot be determined by static analysis alone.
+ *      Using _N macros for all constants also eliminates immediate-value
+ *      patterns from the compiled binary.
+ * [ID] Predikat yang selalu bernilai tetap tapi sulit dianalisis statik.
+ * [JA] 実行時は常に同じ値だが静的解析では判定できない不透明な述語。
  * ================================================================ */
 
 #define OPAK_TRUE_BITS(x) \
@@ -78,29 +96,40 @@
          (void)_jc2; } while(0)
 
 /* ================================================================
- * §3  SHA-256 演算マクロ群 (_N で全シフト量を再定義)
+ * §3  SHA-256 operation macros (all shift amounts via _N)
+ *
+ * [EN] Standard SHA-256 arithmetic: rotate, Ch, Maj, Σ, σ, message schedule
+ *      expansion, round compression, and final accumulation.  Every shift
+ *      amount is expressed via _N macros to hide integer literals.
+ * [ID] Makro aritmetika SHA-256 standar. Semua shift via _N.
+ * [JA] 標準SHA-256演算マクロ。全シフト量を_Nマクロで表現する。
  * ================================================================ */
 
-/* Rotasi 32bit kanan - turunkan jumlah kiri dari _N32 - n */
+/* 32-bit right rotation — derive left shift count as _N32 - n
+ * [ID] Rotasi kanan 32bit | [JA] 32ビット右回転 */
 #define SHA_ROT(x,n)   (((uint32_t)(x)>>(n))|((uint32_t)(x)<<(_N32-(n))))
 
 #define SHA_CH(e,f,g)  (((e)&(f))^(~(e)&(g)))
 #define SHA_MAJ(a,b,c) (((a)&(b))^((a)&(c))^((b)&(c)))
 
-/* Σ 関数: 大文字 (圧縮用) */
+/* Σ functions: uppercase (compression rounds)
+ * [JA] 大文字Σ関数（圧縮ラウンド用） */
 #define SHA_SB0(x) (SHA_ROT(x,_N2) ^SHA_ROT(x,_N13)^SHA_ROT(x,_N22))
 #define SHA_SB1(x) (SHA_ROT(x,_N6) ^SHA_ROT(x,_N11)^SHA_ROT(x,_N25))
 
-/* σ 関数: 小文字 (メッセージスケジュール用) */
+/* σ functions: lowercase (message schedule)
+ * [JA] 小文字σ関数（メッセージスケジュール用） */
 #define SHA_SK0(x) (SHA_ROT(x,_N7) ^SHA_ROT(x,_N18)^((uint32_t)(x)>>_N3))
 #define SHA_SK1(x) (SHA_ROT(x,_N17)^SHA_ROT(x,_N19)^((uint32_t)(x)>>_N10))
 
-/* メッセージスケジュール展開: w[16] 〜 w[63] を算出 */
+/* Message schedule expansion: compute w[16]..w[63]
+ * [JA] メッセージスケジュール展開: w[16]〜w[63]を算出 */
 #define SHA_MSG_EXP(w,i) \
     ((w)[i] = SHA_SK1((w)[(i)-(int)_N2 ]) + (w)[(i)-(int)_N7 ] \
             + SHA_SK0((w)[(i)-(int)_N15]) + (w)[(i)-(int)_N16])
 
-/* ビッグエンディアン 32bit ロード / ストア */
+/* Big-endian 32-bit load / store
+ * [JA] ビッグエンディアン32ビット ロード/ストア */
 #define SHA_BE32_LOAD(p) \
     (((uint32_t)(p)[0]<<_N24)|((uint32_t)(p)[1]<<_N16)| \
      ((uint32_t)(p)[2]<<_N8 )| (uint32_t)(p)[3])
@@ -109,23 +138,32 @@
     do { (p)[0]=(uint8_t)((v)>>_N24); (p)[1]=(uint8_t)((v)>>_N16); \
          (p)[2]=(uint8_t)((v)>>_N8 ); (p)[3]=(uint8_t)((v)       ); } while(0)
 
-/* 1ラウンド圧縮をすべてマクロ展開 */
+/* One compression round, fully macro-expanded
+ * [JA] 1ラウンド圧縮をマクロ展開 */
 #define SHA_ROUND(a,b,c,d,e,f,g,h,Ki,Wi) \
     do { uint32_t _T1 = (h)+SHA_SB1(e)+SHA_CH(e,f,g)+(Ki)+(Wi); \
          uint32_t _T2 = SHA_SB0(a)+SHA_MAJ(a,b,c); \
          (h)=(g); (g)=(f); (f)=(e); (e)=(d)+_T1; \
          (d)=(c); (c)=(b); (b)=(a); (a)=_T1+_T2; } while(0)
 
-/* ハッシュ状態への 8語加算 */
+/* Accumulate 8 words into hash state
+ * [JA] ハッシュ状態への8語加算 */
 #define SHA_ACCUM(st,a,b,c,d,e,f,g,h) \
     do { (st)[0]+=(a); (st)[1]+=(b); (st)[2]+=(c); (st)[3]+=(d); \
          (st)[4]+=(e); (st)[5]+=(f); (st)[6]+=(g); (st)[7]+=(h); } while(0)
 
 /* ================================================================
- * §4  CTR ストリーム / エニグマ演算マクロ群 (_N で全オフセットを再定義)
+ * §4  CTR stream / Enigma operation macros (all offsets via _N)
+ *
+ * [EN] Macros for the CTR-mode byte stream used to seed Fisher-Yates,
+ *      and for the core Enigma rotor operations (S-Box lookup with offset
+ *      correction, byte swap, stepping, inverse table construction).
+ * [ID] Makro untuk CTR stream dan operasi rotor Enigma.
+ * [JA] CTRストリームとEnigmaローター演算マクロ群。
  * ================================================================ */
 
-/* CTR_LE64_PACK: buf[32..39] にカウンタ c をリトルエンディアン 64bit で書き込む */
+/* CTR_LE64_PACK: write counter c as little-endian 64-bit into buf[32..39]
+ * [JA] カウンタをリトルエンディアン64ビットで buf[32..39] に書き込む */
 #define CTR_LE64_PACK(buf, c) \
     do { uint8_t *_p = (uint8_t *)(buf) + _N32; uint64_t _c = (uint64_t)(c); \
          *_p++=(uint8_t)(_c        ); *_p++=(uint8_t)(_c>>_N8 ); \
@@ -133,31 +171,38 @@
          *_p++=(uint8_t)(_c>>_N32  ); *_p++=(uint8_t)(_c>>_N40); \
          *_p++=(uint8_t)(_c>>_N48  ); *_p  =(uint8_t)(_c>>_N56); } while(0)
 
-/* オフセット補正付き S-Box 1段通過 */
+/* One S-Box stage with offset correction
+ * [JA] オフセット補正付きS-Box1段通過 */
 #define ROTOR_PASS(tbl, b, ofs) \
     ((uint8_t)(*((tbl) + (uint8_t)((uint8_t)(b)+(uint8_t)(ofs))) \
                - (uint8_t)(ofs)))
 
-/* 2バイトのポインタ交換 */
+/* Swap two bytes via pointers
+ * [JA] 2バイトのポインタ交換 */
 #define TUKAR_BYTE(p, q) \
     do { uint8_t _tb = *(p); *(p) = *(q); *(q) = _tb; } while(0)
 
-/* オドメーター式ローター送り (uint8_t オーバーフローを意図的に利用) */
+/* Odometer-style rotor stepping (intentional uint8_t overflow for carry)
+ * [JA] オドメーター式ローター送り（uint8_tオーバーフローで桁上がり） */
 #define STEPPING(o) \
     do { if (!++(o)[0]) if (!++(o)[1]) ++(o)[2]; } while(0)
 
-/* 逆写像構築: balik[maju[n]] = n を 256 要素すべてに適用 */
+/* Build inverse mapping: balik[maju[n]] = n for all 256 elements
+ * [JA] 逆写像構築：全256要素に balik[maju[n]]=n を適用 */
 #define INVERS_BUILD(maju, balik) \
     do { uint8_t _n = 0; \
          do { *((balik)+*((maju)+_n)) = _n; } while (++_n); } while(0)
 
-/* 恒等置換 [0..255] を書き込む (uint8_t overflow で 256 回ループ) */
+/* Write identity permutation [0..255] (uint8_t overflow loops exactly 256 times)
+ * [JA] 恒等置換[0..255]を書き込む（uint8_tオーバーフローで256回ループ） */
 #define IDENTITY_FILL(larik) \
     do { uint8_t *_p = (larik); uint8_t _n = 0; \
          do { *_p++ = _n; } while (++_n); } while(0)
 
 /* ================================================================
- * §5  SHA-256 定数テーブル (_N で配列サイズを再定義)
+ * §5  SHA-256 constant tables (array size via _N)
+ *     [ID] Tabel konstanta SHA-256
+ *     [JA] SHA-256定数テーブル（配列サイズを_Nで再定義）
  * ================================================================ */
 
 static const uint32_t K256[_N64] = {
@@ -185,7 +230,9 @@ static const uint32_t IV256[_N8] = {
 };
 
 /* ================================================================
- * §6  型定義 (構造体メンバの配列長をすべて _N に置換)
+ * §6  Internal type definitions (all array lengths via _N)
+ *     [ID] Definisi tipe internal
+ *     [JA] 内部型定義（全配列長を_Nで置換）
  * ================================================================ */
 
 typedef struct {
@@ -203,7 +250,9 @@ typedef struct {
 } ArusByte;
 
 /* ================================================================
- * §7  SHA-256 実装 (すべての数値リテラルを _N で再定義済み)
+ * §7  SHA-256 implementation (all numeric literals replaced by _N)
+ *     [ID] Implementasi SHA-256
+ *     [JA] SHA-256実装（全数値リテラルを_Nで再定義済み）
  * ================================================================ */
 
 FORCEINLINE void proses_blok(KonteksSHA256 *ctx, const uint8_t *blok) {
@@ -284,7 +333,13 @@ void hitung_sha256(const uint8_t *data, size_t panjang, uint8_t hasil[32]) {
 }
 
 /* ================================================================
- * §8  擬似乱数バイトストリーム (CTR-mode SHA-256)
+ * §8  Pseudo-random byte stream (CTR-mode SHA-256)
+ *
+ * [EN] Generates an infinite deterministic byte stream by repeatedly
+ *      hashing (key || counter_LE64) and serving bytes from the output.
+ *      Used exclusively to feed Fisher-Yates during rotor generation.
+ * [ID] Aliran byte semu deterministik via SHA-256 mode CTR.
+ * [JA] CTRモードSHA-256による決定論的擬似乱数バイトストリーム。
  * ================================================================ */
 
 FORCEINLINE void mulai_arus(ArusByte *arus,
@@ -314,7 +369,9 @@ FORCEINLINE uint8_t ambil_byte(ArusByte *arus) {
 }
 
 /* ================================================================
- * §9  ローター生成補助関数
+ * §9  Rotor generation helper functions
+ *     [ID] Fungsi pembantu pembangkitan rotor
+ *     [JA] ローター生成補助関数
  * ================================================================ */
 
 FORCEINLINE void acak_fisher_yates(uint8_t *larik, ArusByte *arus) {
@@ -355,7 +412,8 @@ FORCEINLINE void bangkitkan_reflektor(uint8_t *ref, ArusByte *arus) {
 }
 
 /* ================================================================
- * §10  公開 API
+ * §10  Public API
+ *      [ID] API publik | [JA] 公開API
  * ================================================================ */
 
 void hasilkan_rotor_dari_benih(MesinEnigma *mesin,
@@ -419,12 +477,17 @@ uint8_t enkripsi_byte(MesinEnigma *mesin, uint8_t b) {
 }
 
 /* ================================================================
- * enkripsi_berkas
+ * enkripsi_berkas — Apply Enigma transform to an entire file
  *
- * Baca jalur_masuk per chunk 4096 byte,
- * transform tiap byte dengan enkripsi_byte(), tulis ke jalur_keluar.
- * Involutif: fungsi sama untuk enkripsi dan dekripsi.
- * Nilai kembali: 0=sukses / -1=error
+ * [EN] Reads jalur_masuk in 4096-byte chunks, calls enkripsi_byte() on
+ *      every byte in place, and writes the result to jalur_keluar.
+ *      Because the transform is involutive, the same function call is used
+ *      for both encryption and decryption.
+ *      Returns 0 on success, -1 on any I/O error.
+ * [ID] Proses seluruh berkas per chunk 4096 byte. Involutif: sama untuk
+ *      enkripsi dan dekripsi. Nilai kembali: 0=sukses / -1=error.
+ * [JA] ファイル全体を4096バイトチャンクで処理する。対合なので暗号化と
+ *      復号で同じ関数を使用する。0=成功/-1=エラー。
  * ================================================================ */
 int enkripsi_berkas(MesinEnigma *mesin,
                     const char *jalur_masuk,

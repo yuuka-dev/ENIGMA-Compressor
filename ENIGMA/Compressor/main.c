@@ -19,16 +19,46 @@
 #include "log_samar.h"
 #include "png_lsb.h"
 #include "define.h"
-#include "lang.h"       /* 多言語対応: LANG_JA / LANG_ID / デフォルト英語 */
+/*
+ * main.c — ENIGMA Compressor console front-end
+ *
+ * [EN] Implements the interactive CLI loop.  The user drags files or folders
+ *      onto the console window (which injects quoted paths as stdin lines),
+ *      then presses Enter to trigger encryption, or types a numeric command:
+ *        1 — restore  2 — show queue  3 — clear queue  4 — exit
+ *
+ *      Encryption pipeline (gabungkan_berkas):
+ *        collect files → prompt for base name / key PNG / password
+ *        → Wikipedia seed → PNG LSB hide → Enigma rotors → pack .engm
+ *        → Enigma encrypt → split as _partNNN.log
+ *
+ *      Restoration pipeline (pulihkan_berkas):
+ *        prompt for log prefix / output name / key PNG / password
+ *        → extract seed from PNG LSB → restore .enc from logs
+ *        → Enigma decrypt → unpack .engm → extract files
+ *
+ *      Directory inputs are expanded recursively on Windows via FindFirstFile.
+ *
+ * [ID] Loop CLI interaktif. Drop berkas → Enter untuk enkripsi.
+ *      Perintah numerik 1–4 untuk restore/daftar/bersih/keluar.
+ * [JA] インタラクティブなCLIループ。ファイルドロップ→Enterで暗号化。
+ *      数字コマンド1〜4で復元/キュー表示/クリア/終了。
+ */
+#include "lang.h"       /* compile-time i18n: LANG_JA / LANG_ID / default EN */
 
 #define PANJANG_JALUR_MAKS  _N1024
 #define JUMLAH_JALUR_MAKS   _N32768
 
 /* ================================================================
- * Pembantu internal
+ * Internal helpers
+ * [ID] Pembantu internal | [JA] 内部ヘルパー関数
  * ================================================================ */
 
-/* Buat direktori induk secara rekursif untuk jalur berkas (jika belum ada) */
+/* buat_dir_orang_tua — Recursively create parent directories for a file path
+ * [EN] Splits path at the last separator and calls MKDIR on each ancestor
+ *      directory from the root down.  Silently ignores EEXIST errors.
+ * [ID] Buat direktori induk secara rekursif (abaikan jika sudah ada).
+ * [JA] ファイルパスの親ディレクトリを再帰的に作成する（既存は無視）。 */
 static void buat_dir_orang_tua(const char *jalur_berkas) {
     char buf[PANJANG_JALUR_MAKS];
     char *p;
@@ -65,8 +95,13 @@ static void buat_dir_orang_tua(const char *jalur_berkas) {
     if (buf[0] != '\0') MKDIR(buf);
 }
 
-/* Pecah dan tambahkan jalur dari baris (kutip atau satu token tanpa kutip).
- * Nilai kembali: jumlah jalur yang ditambahkan */
+/* tambah_jalur_dari_baris — Parse one input line and append paths to queue
+ * [EN] Handles both quoted ("C:\path\file") and unquoted (single-token) paths
+ *      on the same line.  Windows drag-and-drop injects quoted paths separated
+ *      by spaces, so multiple files can appear on one line.
+ *      Returns the new total queue size.
+ * [ID] Parse baris berisi satu atau lebih jalur (kutip/tanpa kutip).
+ * [JA] 引用符あり・なしの両形式のパスを1行から解析してキューに追加する。 */
 static int tambah_jalur_dari_baris(const char *baris,
                                     char tujuan[][PANJANG_JALUR_MAKS],
                                     int sudah, int maks) {
@@ -103,7 +138,9 @@ static int tambah_jalur_dari_baris(const char *baris,
     return n; /* Total baru */
 }
 
-/* Hapus spasi di awal dan akhir string */
+/* potong_spasi — Trim leading and trailing whitespace (including \r\n) in place
+ * [ID] Hapus spasi/tab/CR/LF di awal dan akhir string.
+ * [JA] 文字列の前後の空白（\r\nを含む）をインプレースで除去する。 */
 static void potong_spasi(char *s) {
     int panjang = (int)strlen(s);
     while (panjang > 0 && (s[panjang-1] == ' '  ||
@@ -116,7 +153,9 @@ static void potong_spasi(char *s) {
     if (awal != s) memmove(s, awal, strlen(awal) + 1);
 }
 
-/* Tampilkan isi antrian */
+/* tampilkan_daftar — Print the current file queue to stdout
+ * [ID] Tampilkan isi antrian ke stdout.
+ * [JA] 現在のキュー内容を標準出力に表示する。 */
 static void tampilkan_daftar(char (*jalur)[PANJANG_JALUR_MAKS], int jumlah) {
     if (jumlah == 0) { printf(MSG_QUEUE_EMPTY); return; }
     for (int i = 0; i < jumlah; i++)
@@ -124,12 +163,15 @@ static void tampilkan_daftar(char (*jalur)[PANJANG_JALUR_MAKS], int jumlah) {
 }
 
 /* ================================================================
- * kumpulkan_berkas_dari_path
+ * kumpulkan_berkas_dari_path — Expand a mixed file/directory list into files
  *
- * Dari daftar jalur (berkas / direktori), bangun daftar berkas final.
- * - Jika entri adalah berkas: tambahkan apa adanya.
- * - Jika entri adalah direktori: telusuri rekursif seluruh isinya.
- * Nilai kembali: jumlah jalur keluaran.
+ * [EN] Iterates over masukan[]: files are appended directly; directories are
+ *      expanded recursively using FindFirstFile/FindNextFile on Windows or
+ *      opendir/readdir elsewhere.  Subdirectories encountered during recursion
+ *      are processed via a single-element masukan array to reuse the function.
+ *      Returns the total number of files placed in keluaran[].
+ * [ID] Ekspansi daftar berkas/direktori menjadi daftar berkas akhir (rekursif).
+ * [JA] ファイル/ディレクトリの混在リストをファイルリストに再帰展開する。
  * ================================================================ */
 static int kumpulkan_berkas_dari_path(
     char (*masukan)[PANJANG_JALUR_MAKS], int jumlah_masukan,
@@ -217,14 +259,21 @@ static int kumpulkan_berkas_dari_path(
 }
 
 /* ================================================================
- * gabungkan_berkas - Pipet enkripsi lengkap
+ * gabungkan_berkas — Full encryption pipeline
  *
- * STEP 1: Wikipedia -> benih SHA-256
- * STEP 2: benih -> sembunyikan PNG LSB (XOR + Base64)
- * STEP 3: benih -> inisialisasi rotor Enigma
- * STEP 4: berkas -> arsip .engm (pak_berkas)
- * STEP 5: .engm -> .enc enkripsi (enkripsi_berkas)
- * STEP 6: .enc -> _partNNN.log penyamaran (pisahkan_dan_samarkan)
+ * [EN] Prompts for output base name, key PNG path, and XOR password, then
+ *      executes the six-step encryption pipeline:
+ *        STEP 1: Wikipedia API → 32-byte SHA-256 seed
+ *        STEP 2: seed → hide in PNG LSB (optional XOR + Base64)
+ *        STEP 3: seed → initialise Enigma rotors
+ *        STEP 4: files → .engm binary archive (pak_berkas)
+ *        STEP 5: .engm → .enc encrypted file (enkripsi_berkas)
+ *        STEP 6: .enc → _partNNN.log disguised parts (pisahkan_dan_samarkan)
+ *      Temporary files (.engm, .enc) are removed after each step succeeds.
+ * [ID] Enkripsi lengkap 6 langkah: seed Wikipedia → PNG → rotor → .engm
+ *      → .enc → log. Berkas sementara dihapus setelah tiap langkah.
+ * [JA] 6ステップの完全暗号化パイプライン。Wikipedia種→PNG→ローター→
+ *      .engm→.enc→ログ。中間ファイルは各ステップ後に削除する。
  * ================================================================ */
 static void gabungkan_berkas(char (*jalur)[PANJANG_JALUR_MAKS], int jumlah) {
     char       (*jalur_final)[PANJANG_JALUR_MAKS];
@@ -351,12 +400,21 @@ static void gabungkan_berkas(char (*jalur)[PANJANG_JALUR_MAKS], int jumlah) {
 }
 
 /* ================================================================
- * pulihkan_berkas - Pipet pemulihan lengkap
+ * pulihkan_berkas — Full restoration pipeline
  *
- * STEP 0: PNG LSB -> ekstrak benih (Base64 -> XOR)
- * STEP 1: _partNNN.log -> .enc (pulihkan_dari_log)
- * STEP 2: benih -> inisialisasi rotor Enigma
- * STEP 3: .enc -> .engm dekripsi (enkripsi_berkas, involutif)
+ * [EN] Prompts for log prefix, output archive name, key PNG path, and password,
+ *      then executes the restoration pipeline:
+ *        STEP 0: PNG LSB → extract seed (Base64 decode → optional XOR)
+ *        STEP 1: _partNNN.log → .enc.tmp (pulihkan_dari_log)
+ *        STEP 2: seed → reinitialise Enigma rotors
+ *        STEP 3: .enc.tmp → .engm decrypt (enkripsi_berkas, involutive)
+ *        STEP 4: .engm → extract all files to their original paths
+ *      The temporary .enc.tmp file is removed after decryption succeeds.
+ *      The .engm archive is also removed after extraction.
+ * [ID] Pemulihan 4 langkah: ekstrak benih PNG → gabung log → dekripsi →
+ *      ekstrak arsip. Berkas sementara dihapus setelah tiap langkah.
+ * [JA] 4ステップの完全復元パイプライン。PNG種抽出→ログ結合→復号→
+ *      アーカイブ展開。中間ファイルは各ステップ後に削除する。
  * ================================================================ */
 static void pulihkan_berkas(void) {
     char        awalan    [PANJANG_JALUR_MAKS]; /* awalan log                  */
@@ -500,7 +558,17 @@ static void pulihkan_berkas(void) {
 }
 
 /* ================================================================
- * main - Loop utama input drop konsol
+ * main — Console input / command loop
+ *
+ * [EN] Reads lines from stdin in a loop.  Each line is either:
+ *        - A quoted or unquoted file/directory path → appended to queue
+ *        - A numeric command ("1"–"4") → triggers the corresponding action
+ *        - Empty (Enter pressed) → runs the encryption pipeline
+ *      UTF-8 console output is enabled on Windows via SetConsoleOutputCP(65001).
+ * [ID] Loop baca stdin: jalur berkas → tambah ke antrian, perintah numerik →
+ *      aksi, Enter kosong → enkripsi.
+ * [JA] stdinをループ読み込み: パス→キュー追加、数字コマンド→アクション実行、
+ *      空Enter→暗号化実行。UTF-8コンソール出力を有効化する。
  * ================================================================ */
 int main(void) {
 #if defined(_WIN32) || defined(_MSC_VER)

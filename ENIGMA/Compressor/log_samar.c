@@ -1,15 +1,26 @@
 /*
- * log_samar.c
+ * log_samar.c — Binary-to-log disguise and log-to-binary recovery
  *
- * Biner -> penyamaran log / log -> pemulihan biner
+ * [EN] Implements the two-way conversion between an encrypted binary and a
+ *      collection of fake server monitoring log files.
  *
- * Spesifikasi konversi:
- *   - Pisah biner masukan per _N90MB (90MB)
- *   - Konversi 8 byte per baris log (HEX->DEC)
- *   - Nama field disamarkan seperti metrik pemantau server
- *   - Timestamp berdasarkan time(), +2ms per baris
- *   - pad= : jumlah byte nol di akhir (hanya baris terakhir)
- *   - chk= : jumlah 8 byte mod 256 (verifikasi integritas)
+ *      Encoding specification:
+ *        - Input binary is split into 90 MB chunks (_N90MB)
+ *        - Each chunk becomes one *_partNNN.log file
+ *        - 8 bytes are encoded per log line as decimal field values (000–255)
+ *          using field names that mimic real server metrics:
+ *            cpu mem dsk net lat req err tmp
+ *        - Timestamps increment by 2 ms per line from a base of time()
+ *        - pad= field records the number of zero-padding bytes appended to
+ *          fill the last 8-byte group (0 for all complete lines)
+ *        - chk= field holds (sum of all 8 values) mod 256 for integrity
+ *        - First line of each chunk is a STARTUP line recording chunk size
+ *          so restoration knows exactly how many bytes to expect
+ *
+ * [ID] Enkripsi biner <-> log server palsu. 8 byte per baris, pisah 90MB/part.
+ *      Timestamp, checksum, dan STARTUP line untuk integritas dan ukuran chunk.
+ * [JA] 暗号化バイナリ⟺偽サーバーログの双方向変換。1行8バイト、90MB/パート。
+ *      タイムスタンプ・チェックサム・STARTUPラインでチャンクサイズと整合性を管理。
  */
 
 #include "log_samar.h"
@@ -46,11 +57,16 @@ static const char *NAMA_FIELD[BYTE_PER_BARIS] = {
 };
 
 /* ================================================================
- * Pembantu internal - Generate timestamp
+ * buat_waktu — Generate a fake log timestamp string
  *
- * basis   : detik dasar dari time()
- * ms_lanjut: milidetik dari basis
- * out     : format "Mar 15 08:42:31.847"
+ * [EN] Formats a syslog-style timestamp "Mar 15 08:42:31.847" from a base
+ *      Unix time and a running millisecond offset.  Used to make consecutive
+ *      log lines look like they arrived 2 ms apart.
+ *      basis    : base Unix timestamp (seconds) from time()
+ *      ms_lanjut: accumulated millisecond offset from basis
+ *      out / n  : output buffer and its size
+ * [ID] Format timestamp syslog dari detik dasar + offset milidetik.
+ * [JA] syslogスタイルのタイムスタンプを生成する。基準秒+ミリ秒オフセット。
  * ================================================================ */
 static void buat_waktu(time_t basis, uint64_t ms_lanjut,
                         char *out, size_t n) {
@@ -68,13 +84,18 @@ static void buat_waktu(time_t basis, uint64_t ms_lanjut,
 }
 
 /* ================================================================
- * Pembantu internal - Generate satu baris log
+ * buat_baris — Compose one fake log line from 8 data bytes
  *
- * data[8] : data byte (bagian pad sudah nol)
- * pad     : jumlah byte nol (0 = baris penuh)
- * seq     : nomor urut
- * pid     : ID proses palsu
- * out     : buffer keluaran
+ * [EN] Assembles a complete log line in the format:
+ *        <timestamp> <node> agentd[<pid>]: seq=<N> cpu=<v0> mem=<v1> ...
+ *          lat=<v4> req=<v5> err=<v6> tmp=<v7> pad=<pad> chk=<checksum>
+ *      data[8]: payload bytes (zero-padded to 8 if last line)
+ *      pad    : number of zero bytes appended (0 = full line)
+ *      seq    : line sequence number (1-based, global across all parts)
+ *      pid    : pseudo-random fake process ID
+ *      out/n  : output buffer and its size
+ * [ID] Rakit satu baris log palsu dari 8 byte data.
+ * [JA] 8バイトのデータから偽ログ1行を組み立てる。
  * ================================================================ */
 static void buat_baris(const uint8_t *data, uint8_t pad,
                         uint64_t seq, unsigned pid,
@@ -108,9 +129,14 @@ static void buat_baris(const uint8_t *data, uint8_t pad,
 }
 
 /* ================================================================
- * Pembantu internal - Ambil nilai field dari baris log
+ * extrak_nilai — Extract a decimal field value from a log line
  *
- * Ekstrak angka dari format "key=NNN "
+ * [EN] Finds the first occurrence of kunci in baris, then reads the decimal
+ *      integer that follows the "=" sign.  Used during restoration to read
+ *      all eight payload fields as well as the pad= and chk= control fields.
+ *      Returns 0 on success, -1 if the key is not found.
+ * [ID] Cari kunci dalam baris, baca integer desimal setelah "=".
+ * [JA] ログ行から "key=NNN" 形式の数値フィールドを抽出する。
  * ================================================================ */
 static int extrak_nilai(const char* baris, const char* kunci, uint32_t* nilai) {
     const char* p = strstr(baris, kunci);
@@ -128,10 +154,16 @@ static int extrak_nilai(const char* baris, const char* kunci, uint32_t* nilai) {
 }
 
 /* ================================================================
- * pisahkan_dan_samarkan
+ * pisahkan_dan_samarkan — Disguise encrypted binary as log files
  *
- * Pisah biner masukan per UKURAN_CHUNK,
- * tulis tiap chunk ke berkas *_partNNN.log
+ * [EN] Reads the entire input file into memory, then iterates over it in
+ *      UKURAN_CHUNK (90 MB) slices.  For each slice a new *_partNNN.log is
+ *      opened, a STARTUP line is written, then the slice bytes are encoded
+ *      8 per line until the chunk is exhausted.  The last line of each chunk
+ *      uses pad= to record any zero-padding needed to fill the final 8-byte
+ *      group.
+ * [ID] Baca seluruh biner, pisah per 90MB, tulis tiap chunk ke *_partNNN.log.
+ * [JA] バイナリ全体を読み込み、90MBチャンクに分割して各*_partNNN.logに書き出す。
  * ================================================================ */
 int pisahkan_dan_samarkan(const char *berkas_masuk,
                            const char *awalan_keluar) {
@@ -242,11 +274,19 @@ int pisahkan_dan_samarkan(const char *berkas_masuk,
 }
 
 /* ================================================================
- * pulihkan_dari_log
+ * pulihkan_dari_log — Recover encrypted binary from log files
  *
- * Baca awalan_masuk_part001.log, 002.log, ... secara urut,
- * ekstrak 8 byte per baris log untuk memulihkan biner.
- * total_bytes di baris STARTUP mengatur ukuran chunk.
+ * [EN] Opens awalan_part001.log, _part002.log, … in order until a file is
+ *      not found.  For each file:
+ *        - The STARTUP line is parsed for total_bytes (chunk size limit)
+ *        - Each data line is parsed for the 8 payload field values
+ *        - The chk= checksum is verified; mismatched lines are skipped
+ *        - The pad= field determines how many bytes of the last group to write
+ *      If the user supplies a full filename like "output_part001.log" the
+ *      suffix is stripped automatically to derive the base prefix.
+ *      Returns total bytes written, or -1 if no data was found.
+ * [ID] Baca partNNN.log secara urut, verifikasi checksum, pulihkan biner.
+ * [JA] partNNNログを順に読み込み、チェックサム検証後にバイナリを復元する。
  * ================================================================ */
 long long pulihkan_dari_log(const char* awalan_masuk,
     const char* berkas_keluar) {
