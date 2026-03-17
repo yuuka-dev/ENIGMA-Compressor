@@ -5,4 +5,6 @@
 ENIGMA/.vs
 ENIGMA/x64
 ENIGMA/Compressor/x64
+docs/superpowers/plans/
+docs/superpowers/specs/
 *.exe

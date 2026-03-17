@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="Compressor/Compressor.vcxproj" />
+  <Project Path="Compressor/Compressor.vcxproj" Id="1173be33-a004-446c-a328-5209bee674b5" />
 </Solution>

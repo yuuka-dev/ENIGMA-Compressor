@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - lang: en
+            lang_define: ""
+            suffix: ""
+          - lang: ja
+            lang_define: "LANG_JA"
+            suffix: "_ja"
+          - lang: id
+            lang_define: "LANG_ID"
+            suffix: "_id"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Update version in .rc
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          $parts = ($tag -split '\.') + @('0','0','0','0')
+          $major = $parts[0]; $minor = $parts[1]; $patch = $parts[2]; $build = $parts[3]
+          $verComma  = "$major,$minor,$patch,$build"
+          $verDot    = "$major.$minor.$patch.$build"
+          $rc = Get-Content ENIGMA/Compressor/Compressor.rc -Encoding Unicode -Raw
+          $rc = $rc -replace 'FILEVERSION\s+[\d,]+',    "FILEVERSION $verComma"
+          $rc = $rc -replace 'PRODUCTVERSION\s+[\d,]+', "PRODUCTVERSION $verComma"
+          $rc = $rc -replace '"FileVersion",\s*"[\d.]+"',    "`"FileVersion`", `"$verDot`""
+          $rc = $rc -replace '"ProductVersion",\s*"[\d.]+"', "`"ProductVersion`", `"$verDot`""
+          [System.IO.File]::WriteAllText(
+            (Resolve-Path ENIGMA/Compressor/Compressor.rc),
+            $rc,
+            [System.Text.Encoding]::Unicode
+          )
+
+      - name: Build Release x64
+        shell: pwsh
+        run: |
+          $define = "NDEBUG;_CONSOLE"
+          if ("${{ matrix.lang_define }}" -ne "") {
+            $define = "${{ matrix.lang_define }};$define"
+          }
+          msbuild ENIGMA/Compressor/Compressor.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            "/p:PreprocessorDefinitions=$define;%(PreprocessorDefinitions)"
+
+      - name: Rename executable
+        shell: pwsh
+        run: |
+          $suffix = "${{ matrix.suffix }}"
+          Rename-Item ENIGMA/x64/Release/Compressor.exe "Enigma${suffix}.exe"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Enigma${{ matrix.suffix }}
+          path: ENIGMA/x64/Release/Enigma${{ matrix.suffix }}.exe
+
+  create-release:
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract release notes
+        run: |
+          python3 - <<'EOF'
+          import re
+          tag = "${{ github.ref_name }}"
+          content = open("CHANGELOG.md").read()
+          m = re.search(r'(?ms)^## \[' + re.escape(tag) + r'\].*?(?=^## \[|\Z)', content)
+          open("release_notes.md", "w").write(m.group(0).strip() if m else "No release notes found.")
+          EOF
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/Enigma/Enigma.exe
+            artifacts/Enigma_ja/Enigma_ja.exe
+            artifacts/Enigma_id/Enigma_id.exe
+          body_path: release_notes.md
