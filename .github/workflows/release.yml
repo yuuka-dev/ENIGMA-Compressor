@@ -63,13 +63,13 @@ jobs:
         shell: pwsh
         run: |
           $suffix = "${{ matrix.suffix }}"
-          Rename-Item ENIGMA/x64/Release/Compressor.exe "Enigma${suffix}.exe"
+          Rename-Item ENIGMA/Compressor/x64/Release/Compressor.exe "Enigma${suffix}.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Enigma${{ matrix.suffix }}
-          path: ENIGMA/x64/Release/Enigma${{ matrix.suffix }}.exe
+          path: ENIGMA/Compressor/x64/Release/Enigma${{ matrix.suffix }}.exe
 
   create-release:
     needs: build-release
